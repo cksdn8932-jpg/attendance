@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>얼굴 인식 출퇴근</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#111;color:#fff;font-family:'Malgun Gothic',sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh}
+  .tabs{display:flex;width:100%;max-width:480px}
+  .tabs button{flex:1;padding:14px;background:#222;color:#aaa;border:0;font-size:16px}
+  .tabs button.on{background:#0b2a5b;color:#fff;font-weight:bold}
+  #clock{margin:12px 0 6px;font-size:22px;font-weight:bold}
+  #dbg{font-size:12px;color:#9f9;padding:4px 10px;max-width:480px;word-break:break-all}
+  #camBtn{display:none;margin:6px 0;padding:12px 18px;border:0;border-radius:8px;background:#2f6bff;color:#fff;font-weight:bold;font-size:16px}
+  .cam{position:relative;width:100%;max-width:480px;aspect-ratio:3/4;background:#000;overflow:hidden}
+  video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+  .guide{position:absolute;left:50%;top:45%;width:56%;height:52%;transform:translate(-50%,-50%);
+    border:4px solid rgba(255,255,255,.85);border-radius:50% 50% 46% 46%;transition:border-color .2s}
+  .guide.ok{border-color:#4cff7a}
+  .msg{position:absolute;left:5%;right:5%;bottom:4%;background:rgba(10,35,90,.88);border-radius:14px;padding:14px;text-align:center;line-height:1.7}
+  .msg .m1{color:#ffd24d;font-size:19px;font-weight:bold}
+  .msg .m2{font-size:16px}
+  .msg.good .m1{color:#4cff7a} .msg.bad .m1{color:#ff7a7a}
+  #admin{display:none;width:100%;max-width:480px;padding:12px}
+  #admin input,#admin button{width:100%;padding:12px;margin:5px 0;font-size:16px;border-radius:8px;border:0}
+  #admin button{background:#2f6bff;color:#fff;font-weight:bold}
+</style>
+</head>
+<body>
+<div class="tabs">
+  <button id="tabA" class="on" onclick="setMode('attend')">출퇴근</button>
+  <button id="tabR" onclick="setMode('register')">관리자 등록</button>
+</div>
+<div id="clock">--</div>
+<div id="dbg">dbg: HTML 로드됨</div>
+<button id="camBtn" onclick="startCamera()">📷 카메라 켜기</button>
+<div class="cam">
+  <video id="v" autoplay muted playsinline></video>
+  <div class="guide" id="guide"></div>
+  <div class="msg" id="msg"><div class="m1" id="m1">준비 중...</div><div class="m2" id="m2">잠시만 기다려주세요</div></div>
+</div>
+<div id="admin">
+  <input id="nm" placeholder="등록할 직원 이름">
+  <input id="pin" type="password" placeholder="관리자 PIN">
+  <button onclick="doRegister()">얼굴 등록 (약 2초간 정면 유지)</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<script>
+// ★ 여기에 Apps Script 배포 URL(/exec)을 넣으세요
+const API_URL = 'https://script.google.com/macros/s/https://script.google.com/macros/s/AKfycbw6DM2xcV3SJ_PIJeGDqK4WQqCnXHarp96IpYTOWMaPevOU10GqgIG1_LCKhB6hsW_Q/exec';
+
+const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+const video = document.getElementById('v'), guide = document.getElementById('guide');
+let mode = 'attend', busy = false, stable = 0, ready = false, modelsLoaded = false;
+
+function dbg(t){ document.getElementById('dbg').textContent='dbg: '+t; }
+window.onerror = function(m,src,line){ dbg('JS오류: '+m+' (line '+line+')'); };
+window.onunhandledrejection = function(e){ dbg('Promise오류: '+(e.reason&&(e.reason.message||e.reason))); };
+
+const opts = () => new faceapi.TinyFaceDetectorOptions({inputSize:320, scoreThreshold:0.5});
+
+// Apps Script API 호출 (text/plain → CORS 사전요청 회피)
+async function api(payload){
+  const r = await fetch(API_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify(payload)
+  });
+  return await r.json();
+}
+
+setInterval(()=>{const d=new Date();const w='일월화수목금토'[d.getDay()];
+  document.getElementById('clock').textContent=
+  `${d.getMonth()+1}/${String(d.getDate()).padStart(2,'0')}(${w}) ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;},1000);
+
+function say(a,b,cls){const m=document.getElementById('msg');m.className='msg '+(cls||'');
+  document.getElementById('m1').textContent=a;document.getElementById('m2').textContent=b||'';}
+
+function setMode(m){
+  mode=m; stable=0;
+  document.getElementById('tabA').className=m==='attend'?'on':'';
+  document.getElementById('tabR').className=m==='register'?'on':'';
+  document.getElementById('admin').style.display=m==='register'?'block':'none';
+  if(ready) prompt0();
+}
+function prompt0(){
+  if(mode==='attend') say('얼굴 위치를 맞춰주세요','가이드 안에 얼굴을 넣어주세요');
+  else say('등록 모드','이름·PIN 입력 후 등록 버튼을 누르세요');
+}
+
+async function loadModels(){
+  if(modelsLoaded) return;
+  if(typeof faceapi==='undefined') throw new Error('face-api.js 로드 실패(네트워크 확인)');
+  dbg('모델 로딩 중');
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+    faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)]);
+  modelsLoaded = true;
+  dbg('모델 OK');
+}
+
+async function startCamera(){
+  if(ready) return;
+  if(/KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|Line\//i.test(navigator.userAgent)){
+    say('외부 브라우저로 열어주세요','메뉴(⋮)에서 "다른 브라우저로 열기"를 선택하세요','bad');
+  } else {
+    say('카메라 시작 중...','허용 창이 뜨면 허용을 눌러주세요');
+  }
+  try{
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      dbg('getUserMedia 미지원'); say('카메라 API 없음','https 주소인지 확인하세요','bad');
+      document.getElementById('camBtn').style.display='inline-block'; return;
+    }
+    dbg('카메라 요청 중');
+    const s = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false});
+    const t = s.getVideoTracks()[0];
+    dbg('스트림 OK: '+t.label+' / '+t.readyState);
+    video.srcObject = s;
+    await new Promise(res=>{ video.onloadedmetadata=res; setTimeout(res,3000); });
+    try{ await video.play(); }catch(e){ dbg('play 실패: '+e.name); }
+    if(!video.videoWidth){
+      dbg('영상 크기 0');
+      say('카메라 영상이 시작되지 않았어요','다른 앱/탭의 카메라를 끄고 다시 눌러주세요','bad');
+      document.getElementById('camBtn').style.display='inline-block'; return;
+    }
+    dbg('카메라 OK '+video.videoWidth+'x'+video.videoHeight);
+    await loadModels();
+    ready = true;
+    document.getElementById('camBtn').style.display='none';
+    prompt0();
+    if(!window._looping){ window._looping=true; loop(); }
+  }catch(e){
+    dbg('오류: '+(e.name||'')+' / '+(e.message||''));
+    say('카메라 초기화 실패', (e.name||'')+' '+(e.message||''), 'bad');
+    document.getElementById('camBtn').style.display='inline-block';
+  }
+}
+
+function inPosition(box){
+  const vw=video.videoWidth, vh=video.videoHeight;
+  const cx=box.x+box.width/2, cy=box.y+box.height/2;
+  return Math.abs(cx-vw/2)<vw*0.12 && Math.abs(cy-vh*0.45)<vh*0.15 &&
+         box.width>vw*0.25 && box.width<vw*0.6;
+}
+
+async function loop(){
+  try{
+    if(mode==='attend' && !busy && ready){
+      const det = await faceapi.detectSingleFace(video, opts());
+      const ok = det && inPosition(det.box);
+      guide.classList.toggle('ok', !!ok);
+      stable = ok ? stable+1 : 0;
+      if(stable>=3){
+        busy=true; stable=0; say('인식 중...','잠시만 기다려주세요');
+        const r = await faceapi.detectSingleFace(video, opts()).withFaceLandmarks().withFaceDescriptor();
+        if(!r){ busy=false; prompt0(); }
+        else {
+          try{ showResult(await api({action:'checkIn', descriptor:Array.from(r.descriptor)})); }
+          catch(e){ showResult({ok:false,msg:'서버 연결 실패: '+e.message}); }
+        }
+      }
+    }
+  }catch(e){ dbg('loop오류: '+e.message); }
+  setTimeout(loop, 250);
+}
+
+function showResult(r){
+  if(r.ok) say(`${r.name}님 ${r.type}`, r.time, 'good');
+  else say('인식 실패', r.msg, 'bad');
+  setTimeout(()=>{busy=false; prompt0();}, 3000);
+}
+
+async function doRegister(){
+  if(!ready){ say('카메라 준비 안 됨','"카메라 켜기"를 눌러주세요','bad'); document.getElementById('camBtn').style.display='inline-block'; return; }
+  if(busy) return;
+  const name=document.getElementById('nm').value.trim(), pin=document.getElementById('pin').value;
+  if(!name||!pin){ say('입력 필요','이름과 PIN을 입력하세요','bad'); return; }
+  busy=true; say('촬영 중...','정면을 바라보고 가만히 계세요');
+  const list=[];
+  for(let i=0;i<8;i++){
+    const r=await faceapi.detectSingleFace(video,opts()).withFaceLandmarks().withFaceDescriptor();
+    if(r && inPosition(r.detection.box)) list.push(r.descriptor);
+    await new Promise(r=>setTimeout(r,250));
+  }
+  if(list.length<5){ busy=false; say('촬영 실패','얼굴을 가이드 안에 맞추고 다시 시도하세요','bad'); return; }
+  const avg=new Array(128).fill(0);
+  list.forEach(d=>d.forEach((v,i)=>avg[i]+=v/list.length));
+  say('저장 중...','잠시만 기다려주세요');
+  try{
+    const r = await api({action:'registerFace', name:name, pin:pin, descriptor:avg});
+    say(r.ok?'등록 완료':'등록 실패', r.msg, r.ok?'good':'bad');
+  }catch(e){ say('서버 연결 실패', e.message, 'bad'); }
+  busy=false;
+}
+
+dbg('스크립트 시작');
+startCamera();
+document.getElementById('camBtn').style.display='inline-block';
+</script>
+</body>
+</html>
