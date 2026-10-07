@@ -34,6 +34,7 @@
 </div>
 <div id="clock">--</div>
 <div id="dbg">dbg: HTML 로드됨</div>
+ <div id="dbg2" style="font-size:12px;color:#8cf;padding:2px 10px;max-width:480px;word-break:break-all">api: 확인 중</div>
 <button id="camBtn" onclick="startCamera()">📷 카메라 켜기</button>
 <div class="cam">
   <video id="v" autoplay muted playsinline></video>
@@ -196,6 +197,14 @@ async function doRegister(){
   busy=false;
 }
 
+ (function(){
+  const d2=document.getElementById('dbg2');
+  if(API_URL.indexOf('여기에_배포ID')>=0){ d2.textContent='api: API_URL을 실제 주소로 바꿔주세요'; return; }
+  if(!/\/exec$/.test(API_URL)){ d2.textContent='api: API_URL은 /exec 로 끝나야 합니다'; return; }
+  fetch(API_URL).then(r=>r.json()).then(j=>{ d2.textContent='api: 연결 OK - '+j.msg; })
+    .catch(e=>{ d2.textContent='api: 연결 실패 - '+e.message+' (액세스 권한 "모든 사용자"인지 확인)'; });
+})();
+ 
 dbg('스크립트 시작');
 startCamera();
 document.getElementById('camBtn').style.display='inline-block';
